@@ -1,113 +1,50 @@
-// src/lib/logger/file-transport.ts
-import fs from 'fs/promises';
-import { createWriteStream, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
+import fs from 'fs';
 import path from 'path';
-import { type LoggerConfig } from '../../config/logger.config.js';
 
 export class FileTransport {
-  private stream: ReturnType<typeof createWriteStream> | null = null;
-  private currentFile: string = '';
-  private currentSize: number = 0;
-  private fileCount: number = 0;
-  private readonly maxBytes: number;
+    private static instance: FileTransport;
+    private stream?: fs.WriteStream;
+    private initialized = false;
+    private filePath: string;
 
-  constructor(private config: LoggerConfig['file']) {
-    this.maxBytes = this.parseSize(config.maxSize);
-    this.ensureLogDirectory();
-    this.rotateFile(); // Start with first file
-  }
-
-  private parseSize(size: string): number {
-    const units: Record<string, number> = {
-      b: 1,
-      k: 1024,
-      m: 1024 * 1024,
-      g: 1024 * 1024 * 1024,
-    };
-    
-    const match = size.match(/^(\d+)([bkmg])$/i);
-    if (!match) return 10 * 1024 * 1024; // Default 10MB
-    
-    const [, num, unit] = match;
-    return parseInt(num) * units[unit.toLowerCase()];
-  }
-
-  private ensureLogDirectory(): void {
-    if (!existsSync(this.config.directory)) {
-      mkdirSync(this.config.directory, { recursive: true });
-    }
-  }
-
-  private getLogFiles(): string[] {
-    try {
-      return readdirSync(this.config.directory)
-        .filter(file => file.endsWith('.log'))
-        .sort();
-    } catch {
-      return [];
-    }
-  }
-
-  private rotateFile(): void {
-    if (this.stream) {
-      this.stream.end();
-      this.stream = null;
-      
-      // Compress old file if enabled
-      if (this.config.compress && this.currentFile) {
-        this.compressFile(this.currentFile);
-      }
+    private constructor() {
+        this.filePath = path.join(process.cwd(), 'logs', 'app.log');
     }
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    this.fileCount++;
-    this.currentFile = path.join(this.config.directory, `app-${timestamp}.log`);
-    this.currentSize = 0;
-
-    // Clean up old files
-    this.cleanupOldFiles();
-
-    // Create new stream
-    this.stream = createWriteStream(this.currentFile, { flags: 'a' });
-  }
-
-  private async compressFile(filename: string): Promise<void> {
-    // In a real implementation, you'd use zlib or a compression library
-    // This is a placeholder for the compression logic
-    const compressedName = filename + '.gz';
-    // Actual compression would go here
-    console.log(`Would compress ${filename} to ${compressedName}`);
-  }
-
-  private cleanupOldFiles(): void {
-    const files = this.getLogFiles();
-    if (files.length > this.config.maxFiles) {
-      const filesToDelete = files.slice(0, files.length - this.config.maxFiles);
-      filesToDelete.forEach(file => {
-        try {
-          unlinkSync(path.join(this.config.directory, file));
-        } catch (error) {
-          console.error('Failed to delete old log file:', error);
+    static getInstance(): FileTransport {
+        if (!FileTransport.instance) {
+            FileTransport.instance = new FileTransport();
         }
-      });
-    }
-  }
-
-  write(message: string): void {
-    if (!this.stream || this.currentSize >= this.maxBytes) {
-      this.rotateFile();
+        return FileTransport.instance;
     }
 
-    if (this.stream) {
-      this.stream.write(message + '\n');
-      this.currentSize += Buffer.byteLength(message);
-    }
-  }
+    async initialize(): Promise<void> {
+        if (this.initialized) return;
 
-  close(): void {
-    if (this.stream) {
-      this.stream.end();
-      this.stream = null;
+        fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+        this.stream = fs.createWriteStream(this.filePath, { flags: 'a' });
+        this.initialized = true;
     }
-  }
+
+    log(level: string, args: any[]): void {
+        if (!this.initialized || !this.stream) return;
+
+        const timestamp = new Date().toISOString();
+        const message = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        const line = `[${timestamp}] [${level.toUpperCase()}] ${message}\n`;
+        this.stream.write(line);
+    }
+
+    async close(): Promise<void> {
+        if (!this.stream) return;
+
+        await new Promise<void>((resolve, reject) => {
+            const s = this.stream!;
+            s.end(() => resolve());
+            s.on('error', (err) => reject(err));
+        });
+
+        this.stream = undefined;
+        this.initialized = false;
+    }
 }

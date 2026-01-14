@@ -1,254 +1,196 @@
-// src/lib/logger/index.ts
-import { createConsola,type ConsolaInstance, type ConsolaOptions } from 'consola';
-import { getLoggerConfig, type LoggerConfig } from '../../config/logger.config.js';
+import { createConsola, LogLevels, type ConsolaInstance, type LogLevel } from 'consola';
+import { env } from '../../config/env.js';
 import { FileTransport } from './file-transport.js';
 
 export class LoggerService {
-  private consola!: ConsolaInstance;
-  private fileTransport: FileTransport | null = null;
-  private config: LoggerConfig;
-  
-  // Request context storage (for correlation IDs, user info, etc.)
-  private context: Record<string, any> = {};
+    private static instance: LoggerService;
+    private consola: ConsolaInstance;
+    private fileTransport: FileTransport;
+    private isInitialized = false;
 
-  constructor() {
-    this.config = getLoggerConfig();
-    this.initializeLogger();
-  }
+    private constructor() {
+        // Initialize with minimal config, will be configured in initialize()
+        this.consola = createConsola({
+            level: LogLevels.info,
+            defaults: {
+                tag: 'app',
+            },
+        });
 
-  private initializeLogger(): void {
-    const consolaOptions: Partial<ConsolaOptions> = {
-      level: this.mapLevelToConsola(this.config.level),
-      defaults: {
-        tag: 'API',
-        additional: 'gray',
-      },
-    };
-
-    // Console configuration
-    if (this.config.console.enabled) {
-      consolaOptions.stdout = process.stdout;
-      consolaOptions.stderr = process.stderr;
-      consolaOptions.formatOptions = {
-        colors: this.config.console.colors,
-        date: this.config.console.fancy,
-        compact: !this.config.console.fancy,
-      };
-    } else {
-      // Disable console output
-      consolaOptions.stdout = { write: () => {} } as any;
-      consolaOptions.stderr = { write: () => {} } as any;
+        this.fileTransport = FileTransport.getInstance();
     }
 
-    this.consola = createConsola(consolaOptions);
-
-    // File transport
-    if (this.config.file.enabled) {
-      this.fileTransport = new FileTransport(this.config.file);
-      this.setupFileLogging();
-    }
-  }
-
-  private mapLevelToConsola(level: LoggerConfig['level']): number {
-    const levels = {
-      fatal: 0,
-      error: 0,
-      warn: 1,
-      info: 2,
-      debug: 3,
-      trace: 4,
-      silent: 5,
-    };
-    return levels[level] || 2;
-  }
-
-  private setupFileLogging(): void {
-    if (!this.fileTransport) return;
-
-    // Override consola's log method to also write to file
-    const originalLog = this.consola.log;
-    
-    this.consola.log = (...args: any[]) => {
-      // Call original consola log
-      originalLog.apply(this.consola, args);
-      
-      // Write to file in JSON format for production, plain text for dev
-      const logEntry = this.config.file.jsonFormat 
-        ? this.createJsonLog(args)
-        : this.createTextLog(args);
-      
-      this.fileTransport!.write(logEntry);
-    };
-  }
-
-  private createJsonLog(args: any[]): string {
-    const [message, ...rest] = args;
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      level: this.getLogLevelFromArgs(args),
-      message: typeof message === 'string' ? message : JSON.stringify(message),
-      context: { ...this.context },
-      data: rest.length > 0 ? rest : undefined,
-      pid: process.pid,
-      memory: this.config.features.memoryUsage 
-        ? { 
-            rss: process.memoryUsage().rss,
-            heapUsed: process.memoryUsage().heapUsed,
-            heapTotal: process.memoryUsage().heapTotal,
-          }
-        : undefined,
-    };
-    
-    return JSON.stringify(logEntry);
-  }
-
-  private createTextLog(args: any[]): string {
-    const timestamp = new Date().toLocaleString();
-    const contextStr = Object.keys(this.context).length 
-      ? ` [${Object.entries(this.context).map(([k, v]) => `${k}=${v}`).join(', ')}]`
-      : '';
-    
-    return `[${timestamp}]${contextStr} ${args.map(arg => 
-      typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-    ).join(' ')}`;
-  }
-
-  private getLogLevelFromArgs(args: any[]): string {
-    // Consola adds level info to args
-    if (args[0]?.level) return args[0].level;
-    if (args[0]?.type) return args[0].type;
-    return 'info';
-  }
-
-  // Public API
-
-  setContext(context: Record<string, any>): this {
-    this.context = { ...this.context, ...context };
-    return this;
-  }
-
-  clearContext(): this {
-    this.context = {};
-    return this;
-  }
-
-  // Core logging methods
-  fatal(message: string, data?: any): void {
-    this.consola.fatal(message, data);
-  }
-
-  error(message: string, error?: Error, data?: any): void {
-    const errorData = error 
-      ? { 
-          error: error.message,
-          stack: this.config.features.errorStackTraces ? error.stack : undefined,
-          ...data,
+    static getInstance(): LoggerService {
+        if (!LoggerService.instance) {
+            LoggerService.instance = new LoggerService();
         }
-      : data;
-    
-    this.consola.error(message, errorData);
-  }
-
-  warn(message: string, data?: any): void {
-    this.consola.warn(message, data);
-  }
-
-  info(message: string, data?: any): void {
-    this.consola.info(message, data);
-  }
-
-  debug(message: string, data?: any): void {
-    this.consola.debug(message, data);
-  }
-
-  trace(message: string, data?: any): void {
-    this.consola.trace(message, data);
-  }
-
-  // Specialized logging methods
-  http(request: {
-    method: string;
-    url: string;
-    status: number;
-    duration: number;
-    userAgent?: string;
-    ip?: string;
-  }): void {
-    if (!this.config.features.requestLogging) return;
-
-    const { method, url, status, duration, userAgent, ip } = request;
-    
-    this.consola.log({
-      type: 'http',
-      message: `${method} ${url} - ${status} (${duration}ms)`,
-      method,
-      url,
-      status,
-      duration,
-      userAgent,
-      ip,
-      ...this.context,
-    });
-  }
-
-  database(query: string, duration: number, success: boolean = true): void {
-    this.consola.log({
-      type: 'database',
-      message: `DB ${success ? '✓' : '✗'} ${duration}ms`,
-      query: this.config.environment === 'production' ? undefined : query,
-      duration,
-      success,
-      ...this.context,
-    });
-  }
-
-  performance(operation: string, duration: number, threshold: number = 100): void {
-    if (!this.config.features.performanceMetrics) return;
-
-    const level = duration > threshold ? 'warn' : 'debug';
-    this.consola[level]({
-      type: 'performance',
-      message: `${operation} took ${duration}ms`,
-      operation,
-      duration,
-      threshold,
-      ...this.context,
-    });
-  }
-
-  // Lifecycle methods
-  startup(message: string): void {
-    this.consola.start(message);
-  }
-
-  ready(message: string): void {
-    this.consola.ready(message);
-  }
-
-  shutdown(message: string): void {
-    this.consola.info(`🛑 ${message}`);
-    if (this.fileTransport) {
-      this.fileTransport.close();
+        return LoggerService.instance;
     }
-  }
 
-  // Child logger with context
-  child(context: Record<string, any>): LoggerService {
-    const childLogger = new LoggerService();
-    childLogger.setContext({ ...this.context, ...context });
-    return childLogger;
-  }
+    async initialize(): Promise<void> {
+        if (this.isInitialized) return;
+
+        if (!env.LOG_ENABLED) {
+            this.consola.level = LogLevels.silent;
+            return;
+        }
+
+        // Configure Consola based on environment
+        const level = this.mapLogLevel(env.LOG_LEVEL);
+
+        this.consola = createConsola({
+            level,
+            fancy: env.LOG_COLORS,
+            formatOptions: {
+                colors: env.LOG_COLORS,
+                date: env.LOG_TIMESTAMP,
+                compact: env.NODE_ENV === 'production',
+            },
+            defaults: {
+                tag: 'app',
+            },
+        });
+
+        // Initialize file transport if enabled
+        if (env.LOG_TO_FILE) {
+            await this.fileTransport.initialize();
+
+            // Override consola's reporters to add file logging
+            this.overrideReporters();
+        }
+
+        this.isInitialized = true;
+
+        this.info('Logger initialized', {
+            level: env.LOG_LEVEL,
+            toFile: env.LOG_TO_FILE,
+            enabled: env.LOG_ENABLED
+        });
+    }
+
+    private mapLogLevel(level: string): LogLevel {
+        const levelMap: Record<string, LogLevel> = {
+            'fatal': LogLevels.fatal,
+            'error': LogLevels.error,
+            'warn': LogLevels.warn,
+            'info': LogLevels.info,
+            'log': LogLevels.log,
+            'debug': LogLevels.debug,
+            'verbose': LogLevels.verbose,
+            'silent': LogLevels.silent,
+        };
+
+        return levelMap[level.toLowerCase()] || LogLevels.info;
+    }
+
+    private overrideReporters(): void {
+        this.consola.setReporters([
+            {
+                log: (logObj) => {
+                    const levelName = Object.keys(LogLevels).find(key => LogLevels[key as keyof typeof LogLevels] === logObj.level)?.toLowerCase() || 'info';
+                    this.fileTransport.log(levelName, logObj.args);
+                }
+            }
+        ]);
+    }
+
+    // Public logging methods
+    fatal(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.fatal(message, ...args);
+    }
+
+    error(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.error(message, ...args);
+    }
+
+    warn(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.warn(message, ...args);
+    }
+
+    info(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.info(message, ...args);
+    }
+
+    log(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.log(message, ...args);
+    }
+
+    debug(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.debug(message, ...args);
+    }
+
+    verbose(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.verbose(message, ...args);
+    }
+
+    success(message: string, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.success(message, ...args);
+    }
+
+    // Specialized logging methods
+    http(method: string, url: string, status: number, duration: number, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+
+        const statusColor = status >= 500 ? 'red' :
+            status >= 400 ? 'yellow' :
+                status >= 300 ? 'cyan' : 'green';
+
+        this.consola.info(`HTTP ${method} ${url}`, {
+            status,
+            duration: `${duration}ms`,
+            ...args
+        });
+    }
+
+    database(query: string, duration: number, ...args: any[]): void {
+        if (!env.LOG_ENABLED) return;
+        this.consola.debug(`DB Query: ${query}`, {
+            duration: `${duration}ms`,
+            ...args
+        });
+    }
+
+    // Method to add context to logs
+    withContext(context: Record<string, any>) {
+        return {
+            log: (message: string, ...args: any[]) => this.consola.log({ ...context, message }, ...args),
+            info: (message: string, ...args: any[]) => this.consola.info({ ...context, message }, ...args),
+            error: (message: string, ...args: any[]) => this.consola.error({ ...context, message }, ...args),
+            warn: (message: string, ...args: any[]) => this.consola.warn({ ...context, message }, ...args),
+            debug: (message: string, ...args: any[]) => this.consola.debug({ ...context, message }, ...args),
+        };
+    }
+
+    // Method to create child logger with prefix
+    createChild(prefix: string) {
+        const childConsola = this.consola.withTag(prefix);
+
+        return {
+            fatal: (message: string, ...args: any[]) => childConsola.fatal(message, ...args),
+            error: (message: string, ...args: any[]) => childConsola.error(message, ...args),
+            warn: (message: string, ...args: any[]) => childConsola.warn(message, ...args),
+            info: (message: string, ...args: any[]) => childConsola.info(message, ...args),
+            log: (message: string, ...args: any[]) => childConsola.log(message, ...args),
+            debug: (message: string, ...args: any[]) => childConsola.debug(message, ...args),
+            verbose: (message: string, ...args: any[]) => childConsola.verbose(message, ...args),
+            success: (message: string, ...args: any[]) => childConsola.success(message, ...args),
+        };
+    }
+
+    async close(): Promise<void> {
+        if (env.LOG_TO_FILE) {
+            await this.fileTransport.close();
+        }
+    }
 }
 
-// Global logger instance (singleton pattern)
-let globalLogger: LoggerService | null = null;
-
-export const getLogger = (): LoggerService => {
-  if (!globalLogger) {
-    globalLogger = new LoggerService();
-  }
-  return globalLogger;
-};
-
-// Convenience exports
-export const logger = getLogger();
+// Export singleton instance
+export const logger = LoggerService.getInstance();
